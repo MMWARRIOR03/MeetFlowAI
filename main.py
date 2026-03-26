@@ -5,11 +5,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.slack import router as slack_router
+from api.meetings import router as meetings_router
+from api.audit import router as audit_router
 
 app = FastAPI(
     title="MeetFlow AI",
     description="Multi-Agent System for Autonomous Enterprise Workflows",
     version="0.1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
 # Add CORS middleware
@@ -23,6 +28,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(slack_router)
+app.include_router(meetings_router)
+app.include_router(audit_router)
 
 
 @app.get("/")
