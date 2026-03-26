@@ -30,3 +30,8 @@ async def get_db():
             yield session
         finally:
             await session.close()
+
+
+def get_db_session():
+    """Context manager for getting database session."""
+    return AsyncSessionLocal()

@@ -4,8 +4,8 @@ All schemas use BaseModel with field validators.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import List, Optional, Dict, Any, Literal
+from datetime import date as date_type, datetime
+from typing import List, Optional, Dict, Any, Literal, TYPE_CHECKING
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator
 
@@ -52,7 +52,7 @@ class TranscriptSegment(BaseModel):
 class MeetingMetadata(BaseModel):
     """Metadata for a meeting."""
     title: str = Field(..., description="Meeting title")
-    date: date = Field(..., description="Meeting date")
+    date: "date_type" = Field(..., description="Meeting date")
     participants: List[str] = Field(..., description="List of participant names")
 
 
@@ -60,7 +60,7 @@ class NormalizedMeeting(BaseModel):
     """Normalized meeting representation."""
     meeting_id: str = Field(..., description="Unique meeting identifier")
     title: str = Field(..., description="Meeting title")
-    date: date = Field(..., description="Meeting date")
+    date: "date_type" = Field(..., description="Meeting date")
     participants: List[str] = Field(..., description="List of participant names")
     transcript: List[TranscriptSegment] = Field(..., description="Meeting transcript")
 
@@ -70,7 +70,7 @@ class Decision(BaseModel):
     decision_id: str = Field(..., description="Unique decision identifier")
     description: str = Field(..., description="Decision description")
     owner: str = Field(..., description="Person responsible for execution")
-    deadline: date = Field(..., description="Target completion date")
+    deadline: "date_type" = Field(..., description="Target completion date")
     workflow_type: Optional[WorkflowType] = Field(None, description="Workflow type classification")
     confidence: float = Field(..., ge=0.0, le=1.0, description="Extraction confidence score")
     auto_trigger: bool = Field(False, description="Whether decision can auto-execute")

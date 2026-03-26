@@ -10,32 +10,11 @@ import json
 
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from pydantic import BaseModel, Field, field_validator
+
+from schemas.base import TranscriptSegment
 
 
 logger = logging.getLogger(__name__)
-
-
-class TranscriptSegment(BaseModel):
-    """Single segment of meeting transcript."""
-    speaker: str = Field(..., description="Speaker name or identifier")
-    timestamp: str = Field(..., description="Timestamp in HH:MM:SS format")
-    text: str = Field(..., description="Transcript text")
-    
-    @field_validator('timestamp')
-    @classmethod
-    def validate_timestamp(cls, v: str) -> str:
-        """Validate timestamp format HH:MM:SS."""
-        parts = v.split(':')
-        if len(parts) != 3:
-            raise ValueError('Timestamp must be in HH:MM:SS format')
-        try:
-            hours, minutes, seconds = map(int, parts)
-            if not (0 <= hours <= 23 and 0 <= minutes <= 59 and 0 <= seconds <= 59):
-                raise ValueError('Invalid time values')
-        except ValueError:
-            raise ValueError('Timestamp must contain valid integers')
-        return v
 
 
 class GeminiRateLimitError(Exception):
