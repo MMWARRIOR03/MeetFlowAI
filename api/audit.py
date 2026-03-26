@@ -45,144 +45,6 @@ class AuditSummaryResponse(BaseModel):
     failed_workflows: int
 
 
-@router.get("/{meeting_id}", response_model=List[AuditEntryResponse])
-async def get_meeting_audit_trail(
-    meeting_id: str,
-    db: AsyncSession = Depends(get_db)
-) -> List[AuditEntryResponse]:
-    """
-    Get all audit entries for a meeting.
-    
-    Args:
-        meeting_id: Meeting identifier
-        db: Database session
-        
-    Returns:
-        List of audit entries
-        
-    Raises:
-        HTTPException: If meeting not found
-    """
-    logger.info(f"Fetching audit trail for meeting: {meeting_id}")
-    
-    try:
-        # Verify meeting exists
-        meeting_result = await db.execute(
-            select(Meeting).where(Meeting.id == meeting_id)
-        )
-        meeting = meeting_result.scalar_one_or_none()
-        
-        if not meeting:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Meeting {meeting_id} not found"
-            )
-        
-        # Query audit entries
-        result = await db.execute(
-            select(AuditEntry)
-            .where(AuditEntry.meeting_id == meeting_id)
-            .order_by(AuditEntry.created_at)
-        )
-        audit_entries = result.scalars().all()
-        
-        # Format response
-        return [
-            AuditEntryResponse(
-                id=entry.id,
-                meeting_id=entry.meeting_id,
-                decision_id=entry.decision_id,
-                agent=entry.agent,
-                step=entry.step,
-                outcome=entry.outcome,
-                detail=entry.detail,
-                api_call=entry.api_call,
-                http_status=entry.http_status,
-                payload_snapshot=entry.payload_snapshot,
-                created_at=entry.created_at.isoformat()
-            )
-            for entry in audit_entries
-        ]
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to fetch audit trail: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch audit trail: {str(e)}"
-        )
-
-
-@router.get("/decision/{decision_id}", response_model=List[AuditEntryResponse])
-async def get_decision_audit_trail(
-    decision_id: str,
-    db: AsyncSession = Depends(get_db)
-) -> List[AuditEntryResponse]:
-    """
-    Get all audit entries for a decision.
-    
-    Args:
-        decision_id: Decision identifier
-        db: Database session
-        
-    Returns:
-        List of audit entries
-        
-    Raises:
-        HTTPException: If decision not found
-    """
-    logger.info(f"Fetching audit trail for decision: {decision_id}")
-    
-    try:
-        # Verify decision exists
-        decision_result = await db.execute(
-            select(Decision).where(Decision.id == decision_id)
-        )
-        decision = decision_result.scalar_one_or_none()
-        
-        if not decision:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Decision {decision_id} not found"
-            )
-        
-        # Query audit entries
-        result = await db.execute(
-            select(AuditEntry)
-            .where(AuditEntry.decision_id == decision_id)
-            .order_by(AuditEntry.created_at)
-        )
-        audit_entries = result.scalars().all()
-        
-        # Format response
-        return [
-            AuditEntryResponse(
-                id=entry.id,
-                meeting_id=entry.meeting_id,
-                decision_id=entry.decision_id,
-                agent=entry.agent,
-                step=entry.step,
-                outcome=entry.outcome,
-                detail=entry.detail,
-                api_call=entry.api_call,
-                http_status=entry.http_status,
-                payload_snapshot=entry.payload_snapshot,
-                created_at=entry.created_at.isoformat()
-            )
-            for entry in audit_entries
-        ]
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to fetch audit trail: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch audit trail: {str(e)}"
-        )
-
-
 @router.get("/summary", response_model=AuditSummaryResponse)
 async def get_audit_summary(
     db: AsyncSession = Depends(get_db)
@@ -267,4 +129,138 @@ async def get_audit_summary(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch audit summary: {str(e)}"
+        )
+
+
+@router.get("/decision/{decision_id}", response_model=List[AuditEntryResponse])
+async def get_decision_audit_trail(
+    decision_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> List[AuditEntryResponse]:
+    """
+    Get all audit entries for a decision.
+    
+    Args:
+        decision_id: Decision identifier
+        db: Database session
+        
+    Returns:
+        List of audit entries
+        
+    Raises:
+        HTTPException: If decision not found
+    """
+    logger.info(f"Fetching audit trail for decision: {decision_id}")
+    
+    try:
+        # Verify decision exists
+        decision_result = await db.execute(
+            select(Decision).where(Decision.id == decision_id)
+        )
+        decision = decision_result.scalar_one_or_none()
+        
+        if not decision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Decision {decision_id} not found"
+            )
+        
+        # Query audit entries
+        result = await db.execute(
+            select(AuditEntry)
+            .where(AuditEntry.decision_id == decision_id)
+            .order_by(AuditEntry.created_at)
+        )
+        audit_entries = result.scalars().all()
+        
+        return [
+            AuditEntryResponse(
+                id=entry.id,
+                meeting_id=entry.meeting_id,
+                decision_id=entry.decision_id,
+                agent=entry.agent,
+                step=entry.step,
+                outcome=entry.outcome,
+                detail=entry.detail,
+                api_call=entry.api_call,
+                http_status=entry.http_status,
+                payload_snapshot=entry.payload_snapshot,
+                created_at=entry.created_at.isoformat()
+            )
+            for entry in audit_entries
+        ]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch audit trail: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch audit trail: {str(e)}"
+        )
+
+
+@router.get("/{meeting_id}", response_model=List[AuditEntryResponse])
+async def get_meeting_audit_trail(
+    meeting_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> List[AuditEntryResponse]:
+    """
+    Get all audit entries for a meeting.
+    
+    Args:
+        meeting_id: Meeting identifier
+        db: Database session
+        
+    Returns:
+        List of audit entries
+        
+    Raises:
+        HTTPException: If meeting not found
+    """
+    logger.info(f"Fetching audit trail for meeting: {meeting_id}")
+    
+    try:
+        meeting_result = await db.execute(
+            select(Meeting).where(Meeting.id == meeting_id)
+        )
+        meeting = meeting_result.scalar_one_or_none()
+        
+        if not meeting:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Meeting {meeting_id} not found"
+            )
+        
+        result = await db.execute(
+            select(AuditEntry)
+            .where(AuditEntry.meeting_id == meeting_id)
+            .order_by(AuditEntry.created_at)
+        )
+        audit_entries = result.scalars().all()
+        
+        return [
+            AuditEntryResponse(
+                id=entry.id,
+                meeting_id=entry.meeting_id,
+                decision_id=entry.decision_id,
+                agent=entry.agent,
+                step=entry.step,
+                outcome=entry.outcome,
+                detail=entry.detail,
+                api_call=entry.api_call,
+                http_status=entry.http_status,
+                payload_snapshot=entry.payload_snapshot,
+                created_at=entry.created_at.isoformat()
+            )
+            for entry in audit_entries
+        ]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch audit trail: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch audit trail: {str(e)}"
         )

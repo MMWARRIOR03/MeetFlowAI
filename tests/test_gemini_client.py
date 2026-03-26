@@ -4,6 +4,7 @@ Tests for GeminiClient.
 import pytest
 import asyncio
 from unittest.mock import Mock, patch, AsyncMock
+import integrations.gemini as gemini_module
 from integrations.gemini import GeminiClient, GeminiRateLimitError, GeminiAPIError, TranscriptSegment
 
 
@@ -19,25 +20,46 @@ async def test_gemini_client_initialization():
     client = GeminiClient(api_key="test_key", model="gemini-2.0-flash-exp")
     assert client.api_key == "test_key"
     assert client.model_name == "gemini-2.0-flash-exp"
-    assert client.last_call_time is None
+    assert client.min_interval_seconds == 20.0
+    assert client.max_retries == 5
 
 
 @pytest.mark.asyncio
 async def test_rate_limiting(gemini_client):
-    """Test that rate limiting enforces 4-second delay."""
+    """Test that rate limiting waits until the next shared slot."""
     import time
-    
-    # First call should not wait
+
+    gemini_module._global_next_allowed_time = time.monotonic() + 0.15
+
     start = time.time()
     await gemini_client._rate_limit()
-    first_duration = time.time() - start
-    assert first_duration < 0.1  # Should be nearly instant
-    
-    # Second call should wait ~4 seconds
-    start = time.time()
-    await gemini_client._rate_limit()
-    second_duration = time.time() - start
-    assert 3.9 <= second_duration <= 4.2  # Allow small margin
+    duration = time.time() - start
+    assert 0.12 <= duration <= 0.35
+
+
+@pytest.mark.asyncio
+async def test_execute_rate_limited_serializes_requests(gemini_client):
+    """Test that rate-limited execution prevents overlapping Gemini calls."""
+    gemini_client.min_interval_seconds = 0.05
+    gemini_module._global_next_allowed_time = 0.0
+
+    running = 0
+    max_running = 0
+
+    async def fake_request():
+        nonlocal running, max_running
+        running += 1
+        max_running = max(max_running, running)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return "ok"
+
+    await asyncio.gather(
+        gemini_client._execute_rate_limited(fake_request),
+        gemini_client._execute_rate_limited(fake_request),
+    )
+
+    assert max_running == 1
 
 
 @pytest.mark.asyncio
@@ -50,9 +72,8 @@ async def test_generate_json_structure(gemini_client):
         mock_model = Mock()
         mock_model.generate_content = Mock(return_value=mock_response)
         mock_model_class.return_value = mock_model
-        
-        # Reset last_call_time to avoid rate limiting in test
-        gemini_client.last_call_time = None
+        gemini_client.min_interval_seconds = 0
+        gemini_module._global_next_allowed_time = 0.0
         
         result = await gemini_client.generate_json(
             prompt="Test prompt",
@@ -135,9 +156,8 @@ async def test_transcribe_audio_structure(gemini_client):
         mock_model = Mock()
         mock_model.generate_content = Mock(return_value=mock_response)
         mock_model_class.return_value = mock_model
-        
-        # Reset last_call_time to avoid rate limiting in test
-        gemini_client.last_call_time = None
+        gemini_client.min_interval_seconds = 0
+        gemini_module._global_next_allowed_time = 0.0
         
         result = await gemini_client.transcribe_audio(
             audio_data=b"fake_audio_data",

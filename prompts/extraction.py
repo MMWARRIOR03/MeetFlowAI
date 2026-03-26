@@ -70,7 +70,7 @@ EXTRACTION_SCHEMA = {
                     "description": {"type": "string"},
                     "owner": {"type": "string"},
                     "deadline": {"type": "string"},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "confidence": {"type": "number"},
                     "auto_trigger": {"type": "boolean"},
                     "requires_approval": {"type": "boolean"},
                     "raw_quote": {"type": "string"}

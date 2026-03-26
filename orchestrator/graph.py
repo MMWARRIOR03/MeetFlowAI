@@ -76,15 +76,15 @@ def should_send_approval(state: PipelineState) -> str:
         return "summary"
 
 
-def build_pipeline(checkpoint_path: str = "checkpoints.db") -> StateGraph:
+def build_pipeline(checkpoint_path: Optional[str] = None) -> StateGraph:
     """
-    Build LangGraph pipeline with conditional routing and checkpointing.
+    Build LangGraph pipeline with conditional routing and optional checkpointing.
     
     Args:
-        checkpoint_path: Path to SQLite checkpoint database
+        checkpoint_path: Path to SQLite checkpoint database (optional)
         
     Returns:
-        Compiled StateGraph with checkpointing enabled
+        Compiled StateGraph with optional checkpointing enabled
     """
     logger.info("Building LangGraph pipeline")
     
@@ -130,11 +130,13 @@ def build_pipeline(checkpoint_path: str = "checkpoints.db") -> StateGraph:
     # Set finish point
     workflow.add_edge("send_summary", END)
     
-    # Configure checkpointing with SqliteSaver
-    checkpointer = SqliteSaver.from_conn_string(checkpoint_path)
+    # Configure checkpointing if path provided
+    if checkpoint_path:
+        checkpointer = SqliteSaver.from_conn_string(checkpoint_path)
+        compiled_graph = workflow.compile(checkpointer=checkpointer)
+        logger.info("LangGraph pipeline built with checkpointing")
+    else:
+        compiled_graph = workflow.compile()
+        logger.info("LangGraph pipeline built without checkpointing")
     
-    # Compile the graph
-    compiled_graph = workflow.compile(checkpointer=checkpointer)
-    
-    logger.info("LangGraph pipeline built successfully")
     return compiled_graph

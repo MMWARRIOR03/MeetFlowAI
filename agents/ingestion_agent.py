@@ -83,26 +83,11 @@ class IngestionAgent:
                 transcript=transcript
             )
             
-            # Write success audit entry
-            await self._write_audit_entry(
-                meeting_id=meeting_id,
-                outcome="success",
-                detail=f"Successfully ingested meeting from {input_format} format with {len(transcript)} segments"
-            )
-            
             logger.info(f"Successfully ingested meeting {meeting_id} with {len(transcript)} transcript segments")
             return normalized_meeting
             
         except Exception as e:
             logger.error(f"Failed to ingest meeting: {e}")
-            
-            # Write failure audit entry
-            await self._write_audit_entry(
-                meeting_id=meeting_id,
-                outcome="failure",
-                detail=f"Failed to ingest meeting from {input_format} format: {str(e)}"
-            )
-            
             raise
     
     async def _parse_vtt(self, vtt_content: str) -> List[TranscriptSegment]:

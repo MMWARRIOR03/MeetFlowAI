@@ -20,13 +20,43 @@ from agents.extraction_agent import ExtractionAgent
 from agents.classifier_agent import ClassifierAgent
 from agents.workflow.jira_agent import JiraAgent, JiraMode
 from integrations.slack import SlackApprovalGate, create_slack_approval_gate
-from integrations.gemini import GeminiClient
+from integrations.llm_factory import get_llm_client
 from db.database import get_db_session
 from db.models import AuditEntry, Decision as DecisionModel, Meeting as MeetingModel
 from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _mark_meeting_failed(meeting_id: str, reason: str) -> None:
+    """Persist a terminal meeting failure so the API stops reporting 'processing'."""
+    try:
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(MeetingModel).where(MeetingModel.id == meeting_id)
+            )
+            meeting_model = result.scalar_one_or_none()
+            if meeting_model:
+                meeting_model.status = "failed"
+                await session.commit()
+    except Exception as exc:
+        logger.error(f"Failed to mark meeting {meeting_id} as failed: {exc}")
+
+
+async def _set_meeting_status(meeting_id: str, status: str) -> None:
+    """Persist a meeting status transition."""
+    try:
+        async with get_db_session() as session:
+            result = await session.execute(
+                select(MeetingModel).where(MeetingModel.id == meeting_id)
+            )
+            meeting_model = result.scalar_one_or_none()
+            if meeting_model:
+                meeting_model.status = status
+                await session.commit()
+    except Exception as exc:
+        logger.error(f"Failed to set meeting {meeting_id} status to {status}: {exc}")
 
 
 async def ingest_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,7 +107,7 @@ async def ingest_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Create Gemini client
         import os
-        gemini_client = GeminiClient(api_key=os.getenv("GEMINI_API_KEY"))
+        gemini_client = get_llm_client(api_key=os.getenv("GEMINI_API_KEY"))
         
         # Create ingestion agent
         ingestion_agent = IngestionAgent(gemini_client=gemini_client)
@@ -115,6 +145,17 @@ async def ingest_node(state: Dict[str, Any]) -> Dict[str, Any]:
             )
             session.add(meeting_model)
             await session.commit()
+            
+            # Write audit entry after meeting is saved
+            audit_entry = AuditEntry(
+                meeting_id=normalized_meeting.meeting_id,
+                agent="IngestionAgent",
+                step="ingest",
+                outcome="success",
+                detail=f"Successfully ingested meeting from {input_format} format with {len(normalized_meeting.transcript)} segments"
+            )
+            session.add(audit_entry)
+            await session.commit()
         
         state["meeting"] = normalized_meeting
         logger.info(f"Ingestion complete: {len(normalized_meeting.transcript)} segments")
@@ -122,6 +163,8 @@ async def ingest_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Ingestion node failed: {e}")
         state["errors"].append(f"Ingestion failed: {str(e)}")
+        if state.get("meeting_id"):
+            await _mark_meeting_failed(state["meeting_id"], str(e))
     
     return state
 
@@ -178,7 +221,7 @@ async def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Create Gemini client and extraction agent
         import os
-        gemini_client = GeminiClient(api_key=os.getenv("GEMINI_API_KEY"))
+        gemini_client = get_llm_client(api_key=os.getenv("GEMINI_API_KEY"))
         
         async with get_db_session() as session:
             extraction_agent = ExtractionAgent(
@@ -209,12 +252,26 @@ async def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             await session.commit()
             
+            # Write audit entry after decisions are saved
+            audit_entry = AuditEntry(
+                meeting_id=state["meeting_id"],
+                agent="ExtractionAgent",
+                step="extract_decisions",
+                outcome="success",
+                detail=f"Extraction complete: {len(extraction_output.decisions)} decisions, {len(extraction_output.ambiguous_items)} ambiguous",
+                api_call="gemini.generate_json"
+            )
+            session.add(audit_entry)
+            await session.commit()
+            
             state["decisions"] = extraction_output.decisions
             logger.info(f"Extraction complete: {len(extraction_output.decisions)} decisions")
     
     except Exception as e:
         logger.error(f"Extraction node failed: {e}")
         state["errors"].append(f"Extraction failed: {str(e)}")
+        if state.get("meeting_id"):
+            await _mark_meeting_failed(state["meeting_id"], str(e))
     
     return state
 
@@ -267,7 +324,7 @@ async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Create Gemini client and classifier agent
         import os
-        gemini_client = GeminiClient(api_key=os.getenv("GEMINI_API_KEY"))
+        gemini_client = get_llm_client(api_key=os.getenv("GEMINI_API_KEY"))
         
         classifier_outputs = []
         
@@ -302,6 +359,8 @@ async def classify_node(state: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Classification node failed: {e}")
         state["errors"].append(f"Classification failed: {str(e)}")
+        if state.get("meeting_id"):
+            await _mark_meeting_failed(state["meeting_id"], str(e))
     
     return state
 
@@ -632,13 +691,8 @@ async def send_summary_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # For now, just log the summary
             
             # Update meeting status
-            result = await session.execute(
-                select(MeetingModel).where(MeetingModel.id == state["meeting_id"])
-            )
-            meeting_model = result.scalar_one_or_none()
-            if meeting_model:
-                meeting_model.status = "completed"
-                await session.commit()
+            final_status = "failed" if state.get("errors") else "completed"
+            await _set_meeting_status(state["meeting_id"], final_status)
     
     except Exception as e:
         logger.error(f"Send summary node failed: {e}")

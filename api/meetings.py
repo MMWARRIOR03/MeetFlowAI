@@ -130,8 +130,9 @@ async def ingest_meeting(
                 detail=f"Invalid date format: {request.date}. Must be ISO format (YYYY-MM-DD)"
             )
         
-        # Build pipeline
-        pipeline = build_pipeline()
+        # Build pipeline without checkpointing for async API calls
+        # Note: Checkpointing with SqliteSaver is synchronous only
+        pipeline = build_pipeline(checkpoint_path=None)
         
         # Generate meeting ID
         import uuid
@@ -155,12 +156,11 @@ async def ingest_meeting(
             }
         }
         
-        # Invoke pipeline asynchronously
-        # Note: In production, this should be run in a background task
-        config = {"configurable": {"thread_id": meeting_id}}
-        result = await pipeline.ainvoke(initial_state, config)
+        # Run pipeline in background task
+        import asyncio
+        asyncio.create_task(pipeline.ainvoke(initial_state))
         
-        logger.info(f"Meeting {meeting_id} ingested successfully")
+        logger.info(f"Meeting {meeting_id} ingestion started in background")
         
         return MeetingIngestResponse(
             meeting_id=meeting_id,
@@ -586,9 +586,11 @@ async def get_pipeline_status(
         
         pending_steps = [step for step in all_steps if step not in completed_steps]
         
+        pipeline_status = "failed" if errors else meeting.status
+
         return PipelineStatusResponse(
             meeting_id=meeting_id,
-            status=meeting.status,
+            status=pipeline_status,
             completed_steps=completed_steps,
             pending_steps=pending_steps,
             errors=errors

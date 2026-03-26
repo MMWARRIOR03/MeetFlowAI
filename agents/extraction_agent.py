@@ -72,6 +72,11 @@ class ExtractionAgent:
             decisions_raw = response.get("decisions", [])
             ambiguous_items_raw = response.get("ambiguous_items", [])
             
+            # Generate unique decision IDs (replace Gemini's sequential IDs)
+            import uuid
+            for i, decision_data in enumerate(decisions_raw):
+                decision_data["decision_id"] = f"dec_{uuid.uuid4().hex[:8]}"
+            
             # Convert to Pydantic models
             decisions = [Decision(**d) for d in decisions_raw]
             ambiguous_items = [AmbiguousItem(**a) for a in ambiguous_items_raw]
@@ -88,16 +93,7 @@ class ExtractionAgent:
                 f"{len(ambiguous_items)} ambiguous items"
             )
             
-            # Write audit entries for each decision
-            for decision in decisions:
-                await self._write_audit_entry(
-                    meeting_id=meeting.meeting_id,
-                    decision_id=decision.decision_id,
-                    outcome="success",
-                    detail=f"Extracted decision: {decision.description}"
-                )
-            
-            # Write audit entry for extraction completion
+            # Write audit entry for extraction completion only (no per-decision entries)
             await self._write_audit_entry(
                 meeting_id=meeting.meeting_id,
                 decision_id=None,

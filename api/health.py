@@ -104,7 +104,7 @@ async def check_redis() -> DependencyStatus:
 
 async def check_gemini_api() -> DependencyStatus:
     """
-    Check Google Gemini API connectivity.
+    Check the configured LLM provider connectivity.
     
     Returns:
         DependencyStatus with health status
@@ -112,17 +112,24 @@ async def check_gemini_api() -> DependencyStatus:
     start_time = datetime.utcnow()
     
     try:
-        import google.generativeai as genai
-        
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not configured")
-        
-        genai.configure(api_key=api_key)
-        
-        # List models to test API connectivity
-        models = genai.list_models()
-        list(models)  # Force evaluation
+        provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+
+        if provider == "ollama":
+            base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{base_url}/api/tags")
+                response.raise_for_status()
+        else:
+            import google.generativeai as genai
+
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY not configured")
+
+            genai.configure(api_key=api_key)
+
+            models = genai.list_models()
+            list(models)
         
         latency = (datetime.utcnow() - start_time).total_seconds() * 1000
         
@@ -133,7 +140,7 @@ async def check_gemini_api() -> DependencyStatus:
         
     except Exception as e:
         latency = (datetime.utcnow() - start_time).total_seconds() * 1000
-        logger.error(f"Gemini API health check failed: {e}")
+        logger.error(f"LLM health check failed: {e}")
         
         return DependencyStatus(
             healthy=False,

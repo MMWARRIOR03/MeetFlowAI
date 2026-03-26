@@ -3,7 +3,7 @@
 # MeetFlow AI Demo Script
 # Demonstrates the complete pipeline using the Q2 Planning Sync demo fixture
 
-set -e
+set -euo pipefail
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -14,8 +14,11 @@ NC='\033[0m' # No Color
 
 # Configuration
 API_BASE_URL="http://localhost:8000"
+API_KEY="dev-key-12345"
 DEMO_FIXTURE="tests/fixtures/q2_planning_sync.vtt"
 MEETING_ID=""
+MAX_POLL_ATTEMPTS="${MAX_POLL_ATTEMPTS:-36}"
+POLL_INTERVAL_SECONDS="${POLL_INTERVAL_SECONDS:-10}"
 
 # Helper functions
 print_header() {
@@ -34,6 +37,61 @@ print_info() {
 
 print_error() {
     echo -e "${RED}✗ $1${NC}"
+}
+
+api_get() {
+    local url=$1
+    curl -s -H "X-API-Key: ${API_KEY}" "$url"
+}
+
+wait_for_pipeline() {
+    local meeting_id=$1
+    local attempt=1
+
+    print_info "Waiting for pipeline completion (up to $((MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS))s)..."
+
+    while [ $attempt -le $MAX_POLL_ATTEMPTS ]; do
+        local pipeline_status
+        pipeline_status=$(api_get "${API_BASE_URL}/api/pipeline/status/${meeting_id}")
+
+        local detail
+        detail=$(echo "$pipeline_status" | jq -r '.detail // empty')
+
+        if [ -n "$detail" ]; then
+            print_info "Poll $attempt/$MAX_POLL_ATTEMPTS: pipeline status not ready yet (${detail})"
+            sleep "$POLL_INTERVAL_SECONDS"
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        local meeting_status
+        meeting_status=$(echo "$pipeline_status" | jq -r '.status // "unknown"')
+
+        local error_count
+        error_count=$(echo "$pipeline_status" | jq '(.errors // []) | length')
+
+        local completed_steps
+        completed_steps=$(echo "$pipeline_status" | jq -r '(.completed_steps // []) | join(", ")')
+
+        if [ "$meeting_status" = "completed" ]; then
+            print_success "Pipeline completed"
+            return 0
+        fi
+
+        if [ "$meeting_status" = "failed" ] || [ "$error_count" -gt 0 ]; then
+            print_error "Pipeline failed"
+            echo "$pipeline_status" | jq '.'
+            return 1
+        fi
+
+        print_info "Poll $attempt/$MAX_POLL_ATTEMPTS: status=$meeting_status completed_steps=[${completed_steps}]"
+        sleep "$POLL_INTERVAL_SECONDS"
+        attempt=$((attempt + 1))
+    done
+
+    print_error "Pipeline did not reach a terminal state in time"
+    api_get "${API_BASE_URL}/api/pipeline/status/${meeting_id}" | jq '.'
+    return 1
 }
 
 wait_for_service() {
@@ -113,6 +171,7 @@ print_info "Ingesting meeting via API..."
 # Ingest meeting
 RESPONSE=$(curl -s -X POST "${API_BASE_URL}/api/meetings/ingest" \
     -H "Content-Type: application/json" \
+    -H "X-API-Key: ${API_KEY}" \
     -d "$PAYLOAD")
 
 # Extract meeting ID
@@ -128,13 +187,12 @@ print_success "Meeting ingested successfully!"
 print_info "Meeting ID: $MEETING_ID"
 
 # Wait for processing to complete
-print_info "Waiting for pipeline to process meeting (this may take 30-60 seconds)..."
-sleep 10
+wait_for_pipeline "$MEETING_ID"
 
 # Step 3: Query meeting status
 print_header "Step 3: Meeting Status"
 
-MEETING_DATA=$(curl -s "${API_BASE_URL}/api/meetings/${MEETING_ID}")
+MEETING_DATA=$(curl -s -H "X-API-Key: ${API_KEY}" "${API_BASE_URL}/api/meetings/${MEETING_ID}")
 
 echo "$MEETING_DATA" | jq '{
     meeting_id: .meeting_id,
@@ -153,6 +211,12 @@ print_header "Step 4: Extracted Decisions"
 DECISIONS=$(echo "$MEETING_DATA" | jq -r '.decisions')
 DECISION_COUNT=$(echo "$DECISIONS" | jq 'length')
 
+if [ "$DECISION_COUNT" -eq 0 ]; then
+    print_error "Meeting completed with 0 extracted decisions"
+    echo "$MEETING_DATA" | jq '.'
+    exit 1
+fi
+
 print_info "Found $DECISION_COUNT decisions:"
 echo ""
 
@@ -168,7 +232,7 @@ echo "$DECISIONS" | jq -r '.[] |
 # Step 5: Check pipeline status
 print_header "Step 5: Pipeline Execution Status"
 
-PIPELINE_STATUS=$(curl -s "${API_BASE_URL}/api/pipeline/status/${MEETING_ID}")
+PIPELINE_STATUS=$(api_get "${API_BASE_URL}/api/pipeline/status/${MEETING_ID}")
 
 echo "$PIPELINE_STATUS" | jq '{
     meeting_id: .meeting_id,
@@ -183,7 +247,7 @@ print_success "Pipeline status retrieved"
 # Step 6: Check audit trail
 print_header "Step 6: Audit Trail"
 
-AUDIT_TRAIL=$(curl -s "${API_BASE_URL}/api/audit/audit/${MEETING_ID}")
+AUDIT_TRAIL=$(api_get "${API_BASE_URL}/api/audit/${MEETING_ID}")
 AUDIT_COUNT=$(echo "$AUDIT_TRAIL" | jq 'length')
 
 print_info "Found $AUDIT_COUNT audit entries:"
@@ -206,7 +270,7 @@ FIRST_DECISION_ID=$(echo "$DECISIONS" | jq -r '.[0].decision_id')
 if [ "$FIRST_DECISION_ID" != "null" ] && [ -n "$FIRST_DECISION_ID" ]; then
     print_info "Querying decision: $FIRST_DECISION_ID"
     
-    DECISION_DETAIL=$(curl -s "${API_BASE_URL}/api/decisions/${FIRST_DECISION_ID}")
+    DECISION_DETAIL=$(api_get "${API_BASE_URL}/api/decisions/${FIRST_DECISION_ID}")
     
     echo "$DECISION_DETAIL" | jq '{
         decision_id: .decision_id,
@@ -223,7 +287,7 @@ if [ "$FIRST_DECISION_ID" != "null" ] && [ -n "$FIRST_DECISION_ID" ]; then
     # Get decision audit trail
     print_info "Querying audit trail for decision: $FIRST_DECISION_ID"
     
-    DECISION_AUDIT=$(curl -s "${API_BASE_URL}/api/audit/audit/decision/${FIRST_DECISION_ID}")
+    DECISION_AUDIT=$(api_get "${API_BASE_URL}/api/audit/decision/${FIRST_DECISION_ID}")
     DECISION_AUDIT_COUNT=$(echo "$DECISION_AUDIT" | jq 'length')
     
     print_info "Found $DECISION_AUDIT_COUNT audit entries for this decision"
@@ -235,7 +299,7 @@ fi
 # Step 8: System summary
 print_header "Step 8: System Summary"
 
-SUMMARY=$(curl -s "${API_BASE_URL}/api/audit/audit/summary")
+SUMMARY=$(api_get "${API_BASE_URL}/api/audit/summary")
 
 echo "$SUMMARY" | jq '{
     total_meetings: .total_meetings,
