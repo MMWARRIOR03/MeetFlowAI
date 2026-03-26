@@ -4,6 +4,8 @@ MeetFlow AI Multi-Agent System - Main FastAPI Application
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.slack import router as slack_router
+
 app = FastAPI(
     title="MeetFlow AI",
     description="Multi-Agent System for Autonomous Enterprise Workflows",
@@ -18,6 +20,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(slack_router)
 
 
 @app.get("/")
