@@ -13,6 +13,7 @@ import httpx
 from schemas.base import WorkflowResult, WorkflowType
 from db.models import AuditEntry, Decision as DecisionModel
 from db.database import get_db_session
+from integrations.circuit_breaker import get_circuit_breaker, CircuitBreakerConfig
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,20 @@ class JiraAgent:
             timeout=30.0
         )
         
+        self._circuit_breaker = None
+        
         logger.info("JiraAgent initialized")
+    
+    async def _get_circuit_breaker(self):
+        """Get or create circuit breaker for Jira API."""
+        if not self._circuit_breaker:
+            config = CircuitBreakerConfig(
+                failure_threshold=5,
+                recovery_timeout=60,
+                success_threshold=2
+            )
+            self._circuit_breaker = await get_circuit_breaker("jira_api", config)
+        return self._circuit_breaker
     
     async def execute(
         self,
@@ -417,6 +431,7 @@ class JiraAgent:
     ):
         """
         Retry function with exponential backoff on failures.
+        Uses circuit breaker for protection.
         
         Args:
             func: Async function to retry
@@ -429,22 +444,29 @@ class JiraAgent:
         Raises:
             Last exception if all retries fail
         """
-        last_exception = None
+        # Get circuit breaker
+        circuit_breaker = await self._get_circuit_breaker()
         
-        for attempt in range(max_retries + 1):
-            try:
-                return await func()
-            except Exception as e:
-                last_exception = e
-                
-                if attempt < max_retries:
-                    delay = backoff_schedule[attempt] if attempt < len(backoff_schedule) else backoff_schedule[-1]
-                    logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
-                    await asyncio.sleep(delay)
-                else:
-                    logger.error(f"All {max_retries + 1} attempts failed")
+        async def _execute_with_retry():
+            last_exception = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func()
+                except Exception as e:
+                    last_exception = e
+                    
+                    if attempt < max_retries:
+                        delay = backoff_schedule[attempt] if attempt < len(backoff_schedule) else backoff_schedule[-1]
+                        logger.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"All {max_retries + 1} attempts failed")
+            
+            raise last_exception
         
-        raise last_exception
+        # Execute with circuit breaker
+        return await circuit_breaker.call(_execute_with_retry)
     
     async def _write_audit_entry(
         self,

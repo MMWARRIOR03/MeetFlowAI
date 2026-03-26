@@ -12,6 +12,7 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from schemas.base import TranscriptSegment
+from integrations.circuit_breaker import get_circuit_breaker, CircuitBreakerConfig
 
 
 logger = logging.getLogger(__name__)
@@ -44,11 +45,23 @@ class GeminiClient:
         self.api_key = api_key
         self.model_name = model
         self.last_call_time: Optional[float] = None
+        self._circuit_breaker = None
         
         # Configure the SDK
         genai.configure(api_key=api_key)
         
         logger.info(f"Initialized GeminiClient with model: {model}")
+    
+    async def _get_circuit_breaker(self):
+        """Get or create circuit breaker for Gemini API."""
+        if not self._circuit_breaker:
+            config = CircuitBreakerConfig(
+                failure_threshold=5,
+                recovery_timeout=60,
+                success_threshold=2
+            )
+            self._circuit_breaker = await get_circuit_breaker("gemini_api", config)
+        return self._circuit_breaker
     
     async def generate_json(
         self,
@@ -74,6 +87,9 @@ class GeminiClient:
             GeminiAPIError: On other API failures
         """
         logger.info(f"Generating JSON with prompt length: {len(prompt)}")
+        
+        # Get circuit breaker
+        circuit_breaker = await self._get_circuit_breaker()
         
         async def _generate():
             # Rate limiting: wait 4 seconds between consecutive calls
@@ -114,9 +130,13 @@ class GeminiClient:
                 logger.error(f"Response text: {response.text}")
                 raise GeminiAPIError(f"Invalid JSON response: {e}")
         
-        # Retry with backoff on 429 errors
+        # Wrap with circuit breaker and retry logic
+        async def _generate_with_retry():
+            return await self._retry_with_backoff(_generate)
+        
+        # Execute with circuit breaker
         try:
-            result = await self._retry_with_backoff(_generate)
+            result = await circuit_breaker.call(_generate_with_retry)
             return result
         except Exception as e:
             logger.error(f"Gemini API call failed: {e}")

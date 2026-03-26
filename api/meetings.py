@@ -2,6 +2,7 @@
 FastAPI endpoints for meeting and decision management.
 """
 import logging
+import os
 from typing import Dict, Any, Optional
 from datetime import date as date_type
 
@@ -14,10 +15,25 @@ from db.database import get_db
 from db.models import Meeting, Decision, WorkflowResult as WorkflowResultModel
 from schemas.base import InputFormat, MeetingMetadata
 from orchestrator.graph import build_pipeline, PipelineState
+from integrations.cache import (
+    get_cache_client,
+    meeting_cache_key,
+    decision_cache_key,
+    meeting_decisions_cache_key,
+    MEETING_CACHE_TTL,
+    DECISION_CACHE_TTL
+)
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["meetings"])
+
+
+# Get cache client
+def get_cache():
+    """Get cache client dependency."""
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    return get_cache_client(redis_url)
 
 
 # Request/Response models
@@ -182,6 +198,15 @@ async def get_meeting(
     """
     logger.info(f"Fetching meeting: {meeting_id}")
     
+    # Try to get from cache first
+    cache = get_cache()
+    cache_key = meeting_cache_key(meeting_id)
+    cached_data = await cache.get(cache_key)
+    
+    if cached_data:
+        logger.info(f"Meeting {meeting_id} retrieved from cache")
+        return MeetingResponse(**cached_data)
+    
     try:
         # Query meeting
         result = await db.execute(
@@ -215,14 +240,20 @@ async def get_meeting(
             for d in decisions
         ]
         
-        return MeetingResponse(
-            meeting_id=meeting.id,
-            title=meeting.title,
-            date=meeting.date.isoformat(),
-            participants=meeting.participants,
-            status=meeting.status,
-            decisions=decisions_data
-        )
+        response_data = {
+            "meeting_id": meeting.id,
+            "title": meeting.title,
+            "date": meeting.date.isoformat(),
+            "participants": meeting.participants,
+            "status": meeting.status,
+            "decisions": decisions_data
+        }
+        
+        # Cache the response
+        await cache.set(cache_key, response_data, ttl=MEETING_CACHE_TTL)
+        logger.info(f"Meeting {meeting_id} cached for {MEETING_CACHE_TTL}s")
+        
+        return MeetingResponse(**response_data)
         
     except HTTPException:
         raise
@@ -254,6 +285,15 @@ async def get_decision(
     """
     logger.info(f"Fetching decision: {decision_id}")
     
+    # Try to get from cache first
+    cache = get_cache()
+    cache_key = decision_cache_key(decision_id)
+    cached_data = await cache.get(cache_key)
+    
+    if cached_data:
+        logger.info(f"Decision {decision_id} retrieved from cache")
+        return DecisionResponse(**cached_data)
+    
     try:
         # Query decision
         result = await db.execute(
@@ -267,17 +307,23 @@ async def get_decision(
                 detail=f"Decision {decision_id} not found"
             )
         
-        return DecisionResponse(
-            decision_id=decision.id,
-            meeting_id=decision.meeting_id,
-            description=decision.description,
-            owner=decision.owner,
-            deadline=decision.deadline.isoformat(),
-            workflow_type=decision.workflow_type,
-            approval_status=decision.approval_status,
-            confidence=decision.confidence,
-            parameters=decision.parameters
-        )
+        response_data = {
+            "decision_id": decision.id,
+            "meeting_id": decision.meeting_id,
+            "description": decision.description,
+            "owner": decision.owner,
+            "deadline": decision.deadline.isoformat(),
+            "workflow_type": decision.workflow_type,
+            "approval_status": decision.approval_status,
+            "confidence": decision.confidence,
+            "parameters": decision.parameters
+        }
+        
+        # Cache the response
+        await cache.set(cache_key, response_data, ttl=DECISION_CACHE_TTL)
+        logger.info(f"Decision {decision_id} cached for {DECISION_CACHE_TTL}s")
+        
+        return DecisionResponse(**response_data)
         
     except HTTPException:
         raise
@@ -354,6 +400,12 @@ async def approve_decision(
         db.add(audit_entry)
         
         await db.commit()
+        
+        # Invalidate cache
+        cache = get_cache()
+        await cache.delete(decision_cache_key(decision.id))
+        await cache.delete(meeting_cache_key(decision.meeting_id))
+        logger.info(f"Cache invalidated for decision {decision.id}")
         
         logger.info(f"Decision {decision_id} approved successfully")
         
@@ -437,6 +489,12 @@ async def reject_decision(
         db.add(audit_entry)
         
         await db.commit()
+        
+        # Invalidate cache
+        cache = get_cache()
+        await cache.delete(decision_cache_key(decision.id))
+        await cache.delete(meeting_cache_key(decision.meeting_id))
+        logger.info(f"Cache invalidated for decision {decision.id}")
         
         logger.info(f"Decision {decision_id} rejected successfully")
         
@@ -543,4 +601,118 @@ async def get_pipeline_status(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch pipeline status: {str(e)}"
+        )
+
+
+@router.post("/retry/{decision_id}", status_code=status.HTTP_200_OK)
+async def retry_decision(
+    decision_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Dict[str, str]:
+    """
+    Manually retry a failed decision.
+    
+    Args:
+        decision_id: Decision identifier
+        db: Database session
+        
+    Returns:
+        Success message with retry status
+        
+    Raises:
+        HTTPException: If decision not found or not in failed state
+    """
+    logger.info(f"Retrying decision: {decision_id}")
+    
+    try:
+        # Query decision
+        result = await db.execute(
+            select(Decision).where(Decision.id == decision_id)
+        )
+        decision = result.scalar_one_or_none()
+        
+        if not decision:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Decision {decision_id} not found"
+            )
+        
+        # Check if decision has failed workflow results
+        workflow_result = await db.execute(
+            select(WorkflowResultModel)
+            .where(WorkflowResultModel.decision_id == decision_id)
+            .where(WorkflowResultModel.status == "failed")
+        )
+        failed_result = workflow_result.scalar_one_or_none()
+        
+        if not failed_result:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Decision {decision_id} has no failed workflow to retry"
+            )
+        
+        # Mark for retry by updating status
+        failed_result.status = "pending_retry"
+        
+        # Write audit entry
+        from db.models import AuditEntry
+        from datetime import datetime
+        
+        audit_entry = AuditEntry(
+            decision_id=decision.id,
+            meeting_id=decision.meeting_id,
+            agent="API",
+            step="retry_decision",
+            outcome="success",
+            detail=f"Decision marked for retry",
+            payload_snapshot={
+                "workflow_type": failed_result.workflow_type,
+                "previous_error": failed_result.error_message,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        db.add(audit_entry)
+        
+        await db.commit()
+        
+        # Trigger workflow execution
+        # Import here to avoid circular dependency
+        from orchestrator.graph import build_pipeline
+        
+        pipeline = build_pipeline()
+        config = {"configurable": {"thread_id": decision.meeting_id}}
+        
+        # Create minimal state for retry
+        retry_state = {
+            "meeting_id": decision.meeting_id,
+            "meeting": None,
+            "decisions": [decision],
+            "classifier_outputs": [],
+            "approval_pending": [],
+            "workflow_results": [],
+            "errors": [],
+            "input_data": "",
+            "input_format": "json",
+            "metadata": {}
+        }
+        
+        # Execute workflow in background (in production, use task queue)
+        import asyncio
+        asyncio.create_task(pipeline.ainvoke(retry_state, config))
+        
+        logger.info(f"Decision {decision_id} retry initiated")
+        
+        return {
+            "status": "success",
+            "message": f"Decision {decision_id} retry initiated",
+            "workflow_type": failed_result.workflow_type
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to retry decision: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry decision: {str(e)}"
         )

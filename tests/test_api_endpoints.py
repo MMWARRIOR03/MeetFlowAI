@@ -10,6 +10,10 @@ from main import app
 from db.models import Meeting, Decision, AuditEntry
 
 
+# Test API key for authenticated requests
+TEST_API_KEY = "test-key-12345"
+
+
 @pytest.fixture
 def mock_db():
     """Create mock database session."""
@@ -46,7 +50,14 @@ async def test_health_check():
 @pytest.mark.asyncio
 async def test_get_meeting_not_found():
     """Test getting non-existent meeting."""
-    with patch('api.meetings.get_db') as mock_get_db:
+    with patch('api.meetings.get_db') as mock_get_db, \
+         patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}), \
+         patch('api.meetings.get_cache') as mock_get_cache:
+        # Mock cache to return None
+        mock_cache = AsyncMock()
+        mock_cache.get = AsyncMock(return_value=None)
+        mock_get_cache.return_value = mock_cache
+        
         # Mock database to return None
         mock_session = AsyncMock()
         mock_result = AsyncMock()
@@ -59,7 +70,10 @@ async def test_get_meeting_not_found():
         mock_get_db.return_value = mock_db_generator()
         
         async with AsyncClient(app=app, base_url="http://test") as client:
-            response = await client.get("/api/meetings/nonexistent")
+            response = await client.get(
+                "/api/meetings/nonexistent",
+                headers={"X-API-Key": TEST_API_KEY}
+            )
             
             assert response.status_code == 404
             assert "not found" in response.json()["detail"].lower()
@@ -68,7 +82,14 @@ async def test_get_meeting_not_found():
 @pytest.mark.asyncio
 async def test_get_decision_not_found():
     """Test getting non-existent decision."""
-    with patch('api.meetings.get_db') as mock_get_db:
+    with patch('api.meetings.get_db') as mock_get_db, \
+         patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}), \
+         patch('api.meetings.get_cache') as mock_get_cache:
+        # Mock cache to return None
+        mock_cache = AsyncMock()
+        mock_cache.get = AsyncMock(return_value=None)
+        mock_get_cache.return_value = mock_cache
+        
         # Mock database to return None
         mock_session = AsyncMock()
         mock_result = AsyncMock()
@@ -81,7 +102,10 @@ async def test_get_decision_not_found():
         mock_get_db.return_value = mock_db_generator()
         
         async with AsyncClient(app=app, base_url="http://test") as client:
-            response = await client.get("/api/decisions/nonexistent")
+            response = await client.get(
+                "/api/decisions/nonexistent",
+                headers={"X-API-Key": TEST_API_KEY}
+            )
             
             assert response.status_code == 404
             assert "not found" in response.json()["detail"].lower()
@@ -90,7 +114,14 @@ async def test_get_decision_not_found():
 @pytest.mark.asyncio
 async def test_approve_decision_not_found():
     """Test approving non-existent decision."""
-    with patch('api.meetings.get_db') as mock_get_db:
+    with patch('api.meetings.get_db') as mock_get_db, \
+         patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}), \
+         patch('api.meetings.get_cache') as mock_get_cache:
+        # Mock cache
+        mock_cache = AsyncMock()
+        mock_cache.delete = AsyncMock()
+        mock_get_cache.return_value = mock_cache
+        
         # Mock database to return None
         mock_session = AsyncMock()
         mock_result = AsyncMock()
@@ -105,7 +136,8 @@ async def test_approve_decision_not_found():
         async with AsyncClient(app=app, base_url="http://test") as client:
             response = await client.post(
                 "/api/decisions/nonexistent/approve",
-                json={"approver": "test_user"}
+                json={"approver": "test_user"},
+                headers={"X-API-Key": TEST_API_KEY}
             )
             
             assert response.status_code == 404
@@ -115,7 +147,14 @@ async def test_approve_decision_not_found():
 @pytest.mark.asyncio
 async def test_reject_decision_not_found():
     """Test rejecting non-existent decision."""
-    with patch('api.meetings.get_db') as mock_get_db:
+    with patch('api.meetings.get_db') as mock_get_db, \
+         patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}), \
+         patch('api.meetings.get_cache') as mock_get_cache:
+        # Mock cache
+        mock_cache = AsyncMock()
+        mock_cache.delete = AsyncMock()
+        mock_get_cache.return_value = mock_cache
+        
         # Mock database to return None
         mock_session = AsyncMock()
         mock_result = AsyncMock()
@@ -130,7 +169,8 @@ async def test_reject_decision_not_found():
         async with AsyncClient(app=app, base_url="http://test") as client:
             response = await client.post(
                 "/api/decisions/nonexistent/reject",
-                json={"approver": "test_user"}
+                json={"approver": "test_user"},
+                headers={"X-API-Key": TEST_API_KEY}
             )
             
             assert response.status_code == 404
@@ -140,7 +180,8 @@ async def test_reject_decision_not_found():
 @pytest.mark.asyncio
 async def test_get_audit_summary():
     """Test getting audit summary."""
-    with patch('api.audit.get_db') as mock_get_db:
+    with patch('api.audit.get_db') as mock_get_db, \
+         patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}):
         # Mock database to return counts
         mock_session = AsyncMock()
         
@@ -162,7 +203,10 @@ async def test_get_audit_summary():
         mock_get_db.return_value = mock_db_generator()
         
         async with AsyncClient(app=app, base_url="http://test") as client:
-            response = await client.get("/api/audit/summary")
+            response = await client.get(
+                "/api/audit/summary",
+                headers={"X-API-Key": TEST_API_KEY}
+            )
             
             assert response.status_code == 200
             data = response.json()
@@ -179,36 +223,40 @@ async def test_get_audit_summary():
 @pytest.mark.asyncio
 async def test_ingest_meeting_invalid_format():
     """Test ingesting meeting with invalid format."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/api/meetings/ingest",
-            json={
-                "input_format": "invalid",
-                "title": "Test Meeting",
-                "date": "2026-03-20",
-                "participants": ["Alice", "Bob"],
-                "content": "Test content"
-            }
-        )
-        
-        assert response.status_code == 400
-        assert "Invalid input format" in response.json()["detail"]
+    with patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            response = await client.post(
+                "/api/meetings/ingest",
+                json={
+                    "input_format": "invalid",
+                    "title": "Test Meeting",
+                    "date": "2026-03-20",
+                    "participants": ["Alice", "Bob"],
+                    "content": "Test content"
+                },
+                headers={"X-API-Key": TEST_API_KEY}
+            )
+            
+            assert response.status_code == 400
+            assert "Invalid input format" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
 async def test_ingest_meeting_invalid_date():
     """Test ingesting meeting with invalid date."""
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/api/meetings/ingest",
-            json={
-                "input_format": "txt",
-                "title": "Test Meeting",
-                "date": "invalid-date",
-                "participants": ["Alice", "Bob"],
-                "content": "Test content"
-            }
-        )
-        
-        assert response.status_code == 400
-        assert "Invalid date format" in response.json()["detail"]
+    with patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            response = await client.post(
+                "/api/meetings/ingest",
+                json={
+                    "input_format": "txt",
+                    "title": "Test Meeting",
+                    "date": "invalid-date",
+                    "participants": ["Alice", "Bob"],
+                    "content": "Test content"
+                },
+                headers={"X-API-Key": TEST_API_KEY}
+            )
+            
+            assert response.status_code == 400
+            assert "Invalid date format" in response.json()["detail"]

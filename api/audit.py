@@ -45,7 +45,7 @@ class AuditSummaryResponse(BaseModel):
     failed_workflows: int
 
 
-@router.get("/audit/{meeting_id}", response_model=List[AuditEntryResponse])
+@router.get("/{meeting_id}", response_model=List[AuditEntryResponse])
 async def get_meeting_audit_trail(
     meeting_id: str,
     db: AsyncSession = Depends(get_db)
@@ -114,7 +114,7 @@ async def get_meeting_audit_trail(
         )
 
 
-@router.get("/audit/decision/{decision_id}", response_model=List[AuditEntryResponse])
+@router.get("/decision/{decision_id}", response_model=List[AuditEntryResponse])
 async def get_decision_audit_trail(
     decision_id: str,
     db: AsyncSession = Depends(get_db)
@@ -183,7 +183,7 @@ async def get_decision_audit_trail(
         )
 
 
-@router.get("/audit/summary", response_model=AuditSummaryResponse)
+@router.get("/summary", response_model=AuditSummaryResponse)
 async def get_audit_summary(
     db: AsyncSession = Depends(get_db)
 ) -> AuditSummaryResponse:
