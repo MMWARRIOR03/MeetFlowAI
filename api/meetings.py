@@ -12,8 +12,16 @@ from sqlalchemy import select
 from pydantic import BaseModel, Field
 
 from db.database import get_db
-from db.models import Meeting, Decision, WorkflowResult as WorkflowResultModel
-from schemas.base import InputFormat, MeetingMetadata
+from db.models import AuditEntry, Meeting, Decision, WorkflowResult as WorkflowResultModel
+from schemas.base import (
+    InputFormat,
+    MeetingMetadata,
+    NormalizedMeeting,
+    TranscriptSegment,
+    Decision as DecisionSchema,
+    ClassifierOutput,
+    WorkflowType,
+)
 from orchestrator.graph import build_pipeline, PipelineState
 from integrations.cache import (
     get_cache_client,
@@ -34,6 +42,113 @@ def get_cache():
     """Get cache client dependency."""
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     return get_cache_client(redis_url)
+
+
+async def _build_resume_state(db: AsyncSession, meeting_id: str) -> PipelineState:
+    """Build pipeline state from persisted records for post-approval continuation."""
+    meeting_result = await db.execute(
+        select(Meeting).where(Meeting.id == meeting_id)
+    )
+    meeting = meeting_result.scalar_one_or_none()
+    if not meeting:
+        raise ValueError(f"Meeting {meeting_id} not found")
+
+    decisions_result = await db.execute(
+        select(Decision).where(Decision.meeting_id == meeting_id)
+    )
+    decision_models = decisions_result.scalars().all()
+
+    normalized_meeting = NormalizedMeeting(
+        meeting_id=meeting.id,
+        title=meeting.title,
+        date=meeting.date,
+        participants=meeting.participants,
+        transcript=[TranscriptSegment(**segment) for segment in meeting.transcript],
+    )
+
+    decisions = [
+        DecisionSchema(
+            decision_id=decision.id,
+            description=decision.description,
+            owner=decision.owner,
+            deadline=decision.deadline,
+            workflow_type=WorkflowType(decision.workflow_type) if decision.workflow_type else None,
+            confidence=decision.confidence,
+            auto_trigger=decision.auto_trigger,
+            requires_approval=not decision.auto_trigger,
+            raw_quote=decision.raw_quote,
+        )
+        for decision in decision_models
+    ]
+
+    classifier_outputs = [
+        ClassifierOutput(
+            decision_id=decision.id,
+            workflow_type=WorkflowType(decision.workflow_type),
+            parameters=decision.parameters or {},
+            requires_approval=not decision.auto_trigger,
+        )
+        for decision in decision_models
+        if decision.workflow_type
+    ]
+
+    approved_ids = [
+        decision.id
+        for decision in decision_models
+        if decision.approval_status == "approved"
+    ]
+
+    return {
+        "meeting_id": meeting.id,
+        "meeting": normalized_meeting,
+        "decisions": decisions,
+        "classifier_outputs": classifier_outputs,
+        "approval_pending": approved_ids,
+        "workflow_results": [],
+        "verification_results": [],
+        "errors": [],
+        "input_data": None,
+        "input_format": None,
+        "metadata": None,
+    }
+
+
+async def _maybe_resume_after_approval(db: AsyncSession, meeting_id: str) -> None:
+    """
+    Resume workflow execution once all approval-gated decisions are resolved.
+    This bypasses reliance on the original in-memory wait task still being alive.
+    """
+    decisions_result = await db.execute(
+        select(Decision).where(Decision.meeting_id == meeting_id)
+    )
+    decision_models = decisions_result.scalars().all()
+
+    unresolved_required = [
+        decision.id
+        for decision in decision_models
+        if not decision.auto_trigger and decision.approval_status not in ["approved", "rejected"]
+    ]
+    if unresolved_required:
+        logger.info(
+            "Meeting %s still waiting on approvals: %s",
+            meeting_id,
+            ", ".join(unresolved_required),
+        )
+        return
+
+    resume_state = await _build_resume_state(db, meeting_id)
+
+    async def _resume():
+        from orchestrator.nodes import execute_workflows_node, verify_node, send_summary_node
+
+        state = resume_state
+        state = await execute_workflows_node(state)
+        state = await verify_node(state)
+        await send_summary_node(state)
+
+    import asyncio
+    asyncio.create_task(_resume())
+    logger.info("Triggered post-approval workflow resume for meeting %s", meeting_id)
 
 
 # Request/Response models
@@ -87,8 +202,20 @@ class PipelineStatusResponse(BaseModel):
     meeting_id: str
     status: str
     completed_steps: list[str]
+    failed_steps: list[str]
     pending_steps: list[str]
     errors: list[str]
+
+
+class MeetingSummaryResponse(BaseModel):
+    """Response model for persisted meeting summary."""
+    meeting_id: str
+    status: str
+    summary_text: str
+    summary_length: int
+    workflow_result_count: int
+    verification_result_count: int
+    created_at: str
 
 
 @router.post("/meetings/ingest", response_model=MeetingIngestResponse, status_code=status.HTTP_201_CREATED)
@@ -146,6 +273,7 @@ async def ingest_meeting(
             "classifier_outputs": [],
             "approval_pending": [],
             "workflow_results": [],
+            "verification_results": [],
             "errors": [],
             "input_data": request.content,
             "input_format": input_format.value,
@@ -263,6 +391,72 @@ async def get_meeting(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch meeting: {str(e)}"
         )
+
+
+@router.get("/meetings/{meeting_id}/summary", response_model=MeetingSummaryResponse)
+async def get_meeting_summary(
+    meeting_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> MeetingSummaryResponse:
+    """
+    Get the generated execution summary for a meeting.
+
+    Args:
+        meeting_id: Meeting identifier
+        db: Database session
+
+    Returns:
+        Persisted summary content and metadata
+
+    Raises:
+        HTTPException: If meeting or summary not found
+    """
+    logger.info(f"Fetching summary for meeting: {meeting_id}")
+
+    meeting_result = await db.execute(
+        select(Meeting).where(Meeting.id == meeting_id)
+    )
+    meeting = meeting_result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Meeting {meeting_id} not found"
+        )
+
+    summary_result = await db.execute(
+        select(AuditEntry)
+        .where(AuditEntry.meeting_id == meeting_id)
+        .where(AuditEntry.agent == "SummaryAgent")
+        .where(AuditEntry.step == "send_summary")
+        .where(AuditEntry.outcome == "success")
+        .order_by(AuditEntry.created_at.desc())
+    )
+    summary_entry = summary_result.scalars().first()
+
+    if not summary_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Summary for meeting {meeting_id} not found"
+        )
+
+    payload = summary_entry.payload_snapshot or {}
+    summary_text = payload.get("summary_text")
+    if not summary_text:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Summary text for meeting {meeting_id} not found"
+        )
+
+    return MeetingSummaryResponse(
+        meeting_id=meeting_id,
+        status=meeting.status,
+        summary_text=summary_text,
+        summary_length=payload.get("summary_length", len(summary_text)),
+        workflow_result_count=payload.get("workflow_result_count", 0),
+        verification_result_count=payload.get("verification_result_count", 0),
+        created_at=summary_entry.created_at.isoformat(),
+    )
 
 
 @router.get("/decisions/{decision_id}", response_model=DecisionResponse)
@@ -408,6 +602,8 @@ async def approve_decision(
         logger.info(f"Cache invalidated for decision {decision.id}")
         
         logger.info(f"Decision {decision_id} approved successfully")
+
+        await _maybe_resume_after_approval(db, decision.meeting_id)
         
         return {
             "status": "success",
@@ -497,6 +693,8 @@ async def reject_decision(
         logger.info(f"Cache invalidated for decision {decision.id}")
         
         logger.info(f"Decision {decision_id} rejected successfully")
+
+        await _maybe_resume_after_approval(db, decision.meeting_id)
         
         return {
             "status": "success",
@@ -546,30 +744,32 @@ async def get_pipeline_status(
                 detail=f"Meeting {meeting_id} not found"
             )
         
-        # Query audit entries to determine completed steps
-        from db.models import AuditEntry
-        
-        audit_result = await db.execute(
+        # Query audit entries to determine completed and failed steps
+        success_result = await db.execute(
             select(AuditEntry)
             .where(AuditEntry.meeting_id == meeting_id)
             .where(AuditEntry.outcome == "success")
             .order_by(AuditEntry.created_at)
         )
-        audit_entries = audit_result.scalars().all()
+        success_entries = success_result.scalars().all()
         
         # Extract completed steps
         completed_steps = list(set([
             f"{entry.agent}.{entry.step}"
-            for entry in audit_entries
+            for entry in success_entries
         ]))
         
         # Query for errors
-        error_result = await db.execute(
+        failure_result = await db.execute(
             select(AuditEntry)
             .where(AuditEntry.meeting_id == meeting_id)
             .where(AuditEntry.outcome == "failure")
         )
-        error_entries = error_result.scalars().all()
+        error_entries = failure_result.scalars().all()
+        failed_steps = list(set([
+            f"{entry.agent}.{entry.step}"
+            for entry in error_entries
+        ]))
         
         errors = [entry.detail for entry in error_entries]
         
@@ -584,7 +784,12 @@ async def get_pipeline_status(
             "SummaryAgent.send_summary"
         ]
         
-        pending_steps = [step for step in all_steps if step not in completed_steps]
+        pending_steps = [
+            step for step in all_steps
+            if step not in completed_steps and step not in failed_steps
+        ]
+        if meeting.status == "completed":
+            pending_steps = []
         
         pipeline_status = "failed" if errors else meeting.status
 
@@ -592,6 +797,7 @@ async def get_pipeline_status(
             meeting_id=meeting_id,
             status=pipeline_status,
             completed_steps=completed_steps,
+            failed_steps=failed_steps,
             pending_steps=pending_steps,
             errors=errors
         )
@@ -692,6 +898,7 @@ async def retry_decision(
             "classifier_outputs": [],
             "approval_pending": [],
             "workflow_results": [],
+            "verification_results": [],
             "errors": [],
             "input_data": "",
             "input_format": "json",

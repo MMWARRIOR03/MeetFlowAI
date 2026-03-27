@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from schemas.base import WorkflowResult, VerificationResult, WorkflowType, NormalizedMeeting
-from db.models import AuditEntry, WorkflowResult as WorkflowResultModel
+from db.models import AuditEntry, Decision as DecisionModel, WorkflowResult as WorkflowResultModel
 from agents.workflow.jira_agent import JiraAgent
 
 
@@ -62,10 +62,16 @@ class VerificationAgent:
                 return await self._verify_procurement(workflow_result)
             else:
                 logger.warning(f"Unknown workflow type: {workflow_result.workflow_type}")
+                detail = f"Unknown workflow type: {workflow_result.workflow_type}"
+                await self._write_audit_entry(
+                    decision_id=workflow_result.decision_id,
+                    outcome="failure",
+                    detail=detail,
+                )
                 return VerificationResult(
                     decision_id=workflow_result.decision_id,
                     verified=False,
-                    discrepancies=[f"Unknown workflow type: {workflow_result.workflow_type}"]
+                    discrepancies=[detail]
                 )
                 
         except Exception as e:
@@ -102,6 +108,12 @@ class VerificationAgent:
         # Check if workflow succeeded
         if workflow_result.status != "success":
             discrepancies.append(f"Workflow status is {workflow_result.status}")
+            await self._write_audit_entry(
+                decision_id=workflow_result.decision_id,
+                outcome="failure",
+                detail=f"Verification skipped because workflow status is {workflow_result.status}",
+                payload_snapshot={"workflow_status": workflow_result.status},
+            )
             return VerificationResult(
                 decision_id=workflow_result.decision_id,
                 verified=False,
@@ -117,6 +129,11 @@ class VerificationAgent:
         
         if not issue_key:
             discrepancies.append("No issue key found in artifact links")
+            await self._write_audit_entry(
+                decision_id=workflow_result.decision_id,
+                outcome="failure",
+                detail="Verification failed: no issue key found in artifact links",
+            )
             return VerificationResult(
                 decision_id=workflow_result.decision_id,
                 verified=False,
@@ -126,6 +143,7 @@ class VerificationAgent:
         # Query Jira to verify issue exists
         jira_agent = JiraAgent()
         try:
+            meeting_id = await self._resolve_meeting_id(workflow_result.decision_id)
             verified = await jira_agent._verify_ticket(issue_key)
             
             if verified:
@@ -133,6 +151,7 @@ class VerificationAgent:
                 
                 # Write success audit entry
                 await self._write_audit_entry(
+                    meeting_id=meeting_id,
                     decision_id=workflow_result.decision_id,
                     outcome="success",
                     detail=f"Verified Jira issue {issue_key}",
@@ -150,6 +169,7 @@ class VerificationAgent:
                 
                 # Write failure audit entry
                 await self._write_audit_entry(
+                    meeting_id=meeting_id,
                     decision_id=workflow_result.decision_id,
                     outcome="failure",
                     detail=f"Failed to verify Jira issue {issue_key}"
@@ -193,6 +213,12 @@ class VerificationAgent:
                 details={"note": "HR verification not implemented"}
             )
         else:
+            await self._write_audit_entry(
+                decision_id=workflow_result.decision_id,
+                outcome="failure",
+                detail=f"HR verification skipped because workflow status is {workflow_result.status}",
+                payload_snapshot={"workflow_status": workflow_result.status},
+            )
             return VerificationResult(
                 decision_id=workflow_result.decision_id,
                 verified=False,
@@ -229,6 +255,12 @@ class VerificationAgent:
                 details={"note": "Procurement verification not implemented"}
             )
         else:
+            await self._write_audit_entry(
+                decision_id=workflow_result.decision_id,
+                outcome="failure",
+                detail=f"Procurement verification skipped because workflow status is {workflow_result.status}",
+                payload_snapshot={"workflow_status": workflow_result.status},
+            )
             return VerificationResult(
                 decision_id=workflow_result.decision_id,
                 verified=False,
@@ -321,38 +353,41 @@ class VerificationAgent:
         
         summary_text = "\n".join(summary_lines)
         
-        # Write audit entry for summary generation
-        await self._write_audit_entry(
-            decision_id=None,
-            outcome="success",
-            detail=f"Generated summary for meeting {meeting.meeting_id}",
-            payload_snapshot={
-                "meeting_id": meeting.meeting_id,
-                "success_count": success_count,
-                "failed_count": failed_count,
-                "pending_count": pending_count
-            }
-        )
-        
         return summary_text
+
+    async def _resolve_meeting_id(self, decision_id: Optional[str]) -> Optional[str]:
+        """Resolve a decision back to its parent meeting for meeting-linked audit rows."""
+        if not decision_id:
+            return None
+
+        result = await self.db_session.execute(
+            select(DecisionModel.meeting_id).where(DecisionModel.id == decision_id)
+        )
+        return result.scalar_one_or_none()
     
     async def _write_audit_entry(
         self,
         decision_id: Optional[str],
         outcome: str,
         detail: str,
-        payload_snapshot: Optional[Dict[str, Any]] = None
+        payload_snapshot: Optional[Dict[str, Any]] = None,
+        meeting_id: Optional[str] = None,
     ) -> None:
         """
         Write audit entry for verification action.
         
         Args:
+            meeting_id: Meeting identifier (optional)
             decision_id: Decision identifier (optional)
             outcome: Outcome status (success, failure, pending)
             detail: Detailed description of the action
             payload_snapshot: Optional snapshot of verification result
         """
+        if meeting_id is None and decision_id:
+            meeting_id = await self._resolve_meeting_id(decision_id)
+
         audit_entry = AuditEntry(
+            meeting_id=meeting_id,
             decision_id=decision_id,
             agent="VerificationAgent",
             step="verify_execution",

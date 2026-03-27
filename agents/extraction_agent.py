@@ -14,6 +14,7 @@ from schemas.base import (
     ExtractionOutput
 )
 from integrations.gemini import GeminiClient
+from integrations.llm_factory import get_llm_api_call_label
 from prompts.extraction import EXTRACTION_PROMPT, EXTRACTION_SCHEMA
 from db.models import AuditEntry
 
@@ -98,7 +99,8 @@ class ExtractionAgent:
                 meeting_id=meeting.meeting_id,
                 decision_id=None,
                 outcome="success",
-                detail=f"Extraction complete: {len(decisions)} decisions, {len(ambiguous_items)} ambiguous"
+                detail=f"Extraction complete: {len(decisions)} decisions, {len(ambiguous_items)} ambiguous",
+                api_call=get_llm_api_call_label()
             )
             
             return ExtractionOutput(
@@ -235,7 +237,8 @@ Resolve relative deadlines based on the meeting date ({meeting.date.isoformat()}
         meeting_id: str,
         decision_id: Optional[str],
         outcome: str,
-        detail: str
+        detail: str,
+        api_call: Optional[str] = None
     ) -> None:
         """
         Write audit entry for extraction action.
@@ -251,10 +254,10 @@ Resolve relative deadlines based on the meeting date ({meeting.date.isoformat()}
             decision_id=decision_id,
             agent="ExtractionAgent",
             step="extract_decisions",
-            outcome=outcome,
-            detail=detail,
-            api_call="gemini.generate_json" if outcome == "success" else None
-        )
+                outcome=outcome,
+                detail=detail,
+                api_call=api_call
+            )
         
         self.db_session.add(audit_entry)
         await self.db_session.commit()

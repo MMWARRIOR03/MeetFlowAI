@@ -15,6 +15,7 @@ def mock_db_session():
     session = AsyncMock()
     session.add = MagicMock()
     session.commit = AsyncMock()
+    session.execute = AsyncMock()
     return session
 
 
@@ -205,3 +206,23 @@ async def test_verify_procurement_workflow(verification_agent):
     assert result.decision_id == "dec_004"
     assert result.verified is True
     assert result.details["note"] == "Procurement verification not implemented"
+
+
+@pytest.mark.asyncio
+async def test_write_audit_entry_resolves_meeting_id_from_decision(
+    verification_agent,
+    mock_db_session,
+):
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = "meeting_001"
+    mock_db_session.execute.return_value = execute_result
+
+    await verification_agent._write_audit_entry(
+        decision_id="dec_001",
+        outcome="success",
+        detail="Verified Jira issue PROJ-1",
+    )
+
+    audit_entry = mock_db_session.add.call_args.args[0]
+    assert audit_entry.meeting_id == "meeting_001"
+    assert audit_entry.decision_id == "dec_001"

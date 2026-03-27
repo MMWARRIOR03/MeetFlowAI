@@ -5,6 +5,7 @@ Executes Jira operations (CREATE/UPDATE/SEARCH) with retry logic and verificatio
 import os
 import logging
 import asyncio
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
@@ -38,6 +39,11 @@ class JiraAgent:
         self.jira_url = os.getenv("JIRA_URL", "").rstrip('/')
         self.jira_email = os.getenv("JIRA_EMAIL", "")
         self.jira_api_token = os.getenv("JIRA_API_TOKEN", "")
+        self.default_project_key = os.getenv("JIRA_DEFAULT_PROJECT_KEY", "PROJ")
+        allowed_project_keys = os.getenv("JIRA_ALLOWED_PROJECT_KEYS", self.default_project_key)
+        self.allowed_project_keys = {
+            key.strip() for key in allowed_project_keys.split(",") if key.strip()
+        } or {self.default_project_key}
         
         if not all([self.jira_url, self.jira_email, self.jira_api_token]):
             logger.warning("Jira credentials not fully configured")
@@ -85,8 +91,9 @@ class JiraAgent:
         try:
             # Route to mode-specific handler
             if mode == JiraMode.CREATE:
+                project_key = self._resolve_project_key(parameters.get("project_key"))
                 issue_key = await self._create_ticket(
-                    project_key=parameters.get("project_key"),
+                    project_key=project_key,
                     issue_type=parameters.get("issue_type", "Task"),
                     summary=parameters.get("summary", decision.description),
                     description=parameters.get("description", decision.description),
@@ -95,14 +102,16 @@ class JiraAgent:
                     raw_quote=decision.raw_quote
                 )
             elif mode == JiraMode.UPDATE:
+                update_fields = self._normalize_update_fields(parameters)
                 issue_key = await self._update_ticket(
                     issue_key=parameters.get("issue_key"),
-                    fields=parameters.get("fields", {})
+                    fields=update_fields
                 )
             elif mode == JiraMode.SEARCH_THEN_UPDATE:
+                update_fields = self._normalize_update_fields(parameters)
                 issue_key = await self._search_then_update(
                     jql_query=parameters.get("jql_query"),
-                    fields=parameters.get("fields", {})
+                    fields=update_fields
                 )
             else:
                 raise ValueError(f"Unsupported Jira mode: {mode}")
@@ -118,6 +127,7 @@ class JiraAgent:
             
             # Write success audit entry
             await self._write_audit_entry(
+                meeting_id=decision.meeting_id,
                 decision_id=decision.id,
                 outcome="success",
                 detail=f"Successfully executed {mode} operation for issue {issue_key}",
@@ -138,6 +148,7 @@ class JiraAgent:
             
             # Write failure audit entry
             await self._write_audit_entry(
+                meeting_id=decision.meeting_id,
                 decision_id=decision.id,
                 outcome="failure",
                 detail=f"Failed to execute {mode} operation: {str(e)}",
@@ -152,7 +163,21 @@ class JiraAgent:
                 artifact_links=[],
                 error_message=str(e)
             )
-    
+
+    def _resolve_project_key(self, requested_project_key: Optional[str]) -> str:
+        """Normalize create requests onto an allowed Jira project key."""
+        if requested_project_key in self.allowed_project_keys:
+            return requested_project_key
+
+        if requested_project_key and requested_project_key != self.default_project_key:
+            logger.warning(
+                "Unsupported Jira project key '%s'; falling back to default project '%s'",
+                requested_project_key,
+                self.default_project_key,
+            )
+
+        return self.default_project_key
+
     async def _create_ticket(
         self,
         project_key: str,
@@ -214,11 +239,13 @@ class JiraAgent:
                 "issuetype": {
                     "name": issue_type
                 },
-                "priority": {
-                    "name": priority
-                }
             }
         }
+
+        if isinstance(priority, str) and priority.strip():
+            payload["fields"]["priority"] = {
+                "name": priority.strip()
+            }
         
         # Add assignee if resolved
         if assignee_id:
@@ -231,8 +258,12 @@ class JiraAgent:
                 json=payload
             )
         )
-        
-        response.raise_for_status()
+
+        self._raise_for_status_with_context(
+            response,
+            operation="create issue",
+            payload=payload
+        )
         result = response.json()
         issue_key = result["key"]
         
@@ -272,8 +303,12 @@ class JiraAgent:
                 json=payload
             )
         )
-        
-        response.raise_for_status()
+
+        self._raise_for_status_with_context(
+            response,
+            operation=f"update issue {issue_key}",
+            payload=payload
+        )
         
         logger.info(f"Updated Jira issue {issue_key}")
         return issue_key
@@ -303,8 +338,12 @@ class JiraAgent:
                 params={"jql": jql_query, "maxResults": 1}
             )
         )
-        
-        response.raise_for_status()
+
+        self._raise_for_status_with_context(
+            response,
+            operation="search issue",
+            payload={"jql": jql_query, "maxResults": 1}
+        )
         result = response.json()
         
         if result.get("total", 0) > 0:
@@ -345,6 +384,60 @@ class JiraAgent:
         except Exception as e:
             logger.error(f"Failed to verify issue {issue_key}: {e}")
             return False
+
+    def _normalize_update_fields(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert classifier-style update parameters into Jira field payloads."""
+        if parameters.get("fields"):
+            return self._normalize_jira_field_values(parameters["fields"])
+
+        fields_to_update = parameters.get("fields_to_update", [])
+        new_values = parameters.get("new_values", {})
+        normalized: Dict[str, Any] = {}
+
+        field_name_map = {
+            "deadline": "duedate",
+        }
+
+        for field_name in fields_to_update:
+            if field_name not in new_values:
+                continue
+            jira_field = field_name_map.get(field_name, field_name)
+            normalized[jira_field] = new_values[field_name]
+
+        if not normalized and "new_values" in parameters:
+            for field_name, value in new_values.items():
+                jira_field = field_name_map.get(field_name, field_name)
+                normalized[jira_field] = value
+
+        return self._normalize_jira_field_values(normalized)
+
+    def _normalize_jira_field_values(self, fields: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize field values into Jira's expected update payload shapes."""
+        normalized = dict(fields)
+
+        priority_value = normalized.get("priority")
+        if isinstance(priority_value, str):
+            normalized["priority"] = {"name": priority_value}
+
+        return normalized
+
+    def _raise_for_status_with_context(
+        self,
+        response: httpx.Response,
+        operation: str,
+        payload: Dict[str, Any]
+    ) -> None:
+        """Raise a descriptive error with Jira response details and request payload."""
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response_text = response.text.strip()
+            detail = (
+                f"Jira {operation} failed with {response.status_code} for {response.request.url}. "
+                f"Response: {response_text or '<empty>'}. "
+                f"Payload: {json.dumps(payload, default=str)}"
+            )
+            raise ValueError(detail) from exc
     
     async def _resolve_user(self, username: str) -> Optional[str]:
         """
@@ -470,6 +563,7 @@ class JiraAgent:
     
     async def _write_audit_entry(
         self,
+        meeting_id: Optional[str],
         decision_id: str,
         outcome: str,
         detail: str,
@@ -489,6 +583,7 @@ class JiraAgent:
         try:
             async with get_db_session() as session:
                 audit_entry = AuditEntry(
+                    meeting_id=meeting_id,
                     decision_id=decision_id,
                     agent="JiraAgent",
                     step="execute",

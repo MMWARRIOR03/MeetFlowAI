@@ -13,6 +13,7 @@ from schemas.base import (
     WorkflowType
 )
 from integrations.gemini import GeminiClient
+from integrations.llm_factory import get_llm_api_call_label
 from prompts.classification import CLASSIFICATION_PROMPT, CLASSIFICATION_SCHEMA
 from db.models import AuditEntry
 
@@ -106,7 +107,8 @@ class ClassifierAgent:
                     "workflow_type": workflow_type.value,
                     "parameters": resolved_parameters,
                     "requires_approval": requires_approval
-                }
+                },
+                api_call=get_llm_api_call_label()
             )
             
             return classifier_output
@@ -344,7 +346,8 @@ Classify this decision into the appropriate workflow type and extract all releva
         decision_id: str,
         outcome: str,
         detail: str,
-        payload_snapshot: Optional[Dict[str, Any]] = None
+        payload_snapshot: Optional[Dict[str, Any]] = None,
+        api_call: Optional[str] = None
     ) -> None:
         """
         Write audit entry for classification action.
@@ -363,7 +366,7 @@ Classify this decision into the appropriate workflow type and extract all releva
             step="classify_decision",
             outcome=outcome,
             detail=detail,
-            api_call="gemini.generate_json" if outcome == "success" else None,
+            api_call=api_call,
             payload_snapshot=payload_snapshot
         )
         

@@ -238,6 +238,7 @@ echo "$PIPELINE_STATUS" | jq '{
     meeting_id: .meeting_id,
     status: .status,
     completed_steps: .completed_steps,
+    failed_steps: .failed_steps,
     pending_steps: .pending_steps,
     errors: .errors
 }'

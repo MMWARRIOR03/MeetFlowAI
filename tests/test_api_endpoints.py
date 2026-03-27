@@ -112,6 +112,58 @@ async def test_get_decision_not_found():
 
 
 @pytest.mark.asyncio
+async def test_get_meeting_summary():
+    """Test fetching a persisted meeting summary."""
+    with patch('api.auth.get_valid_api_keys', return_value={TEST_API_KEY}):
+        meeting = MagicMock(spec=Meeting)
+        meeting.id = "meeting_001"
+        meeting.status = "completed"
+
+        summary_entry = MagicMock(spec=AuditEntry)
+        summary_entry.payload_snapshot = {
+            "summary_text": "Summary body",
+            "summary_length": 12,
+            "workflow_result_count": 2,
+            "verification_result_count": 2,
+        }
+        summary_entry.created_at = datetime(2026, 3, 27, 6, 0, 0)
+
+        meeting_result = AsyncMock()
+        meeting_result.scalar_one_or_none = MagicMock(return_value=meeting)
+
+        summary_scalars = MagicMock()
+        summary_scalars.first.return_value = summary_entry
+
+        summary_result = MagicMock()
+        summary_result.scalars.return_value = summary_scalars
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=[meeting_result, summary_result])
+
+        async def mock_db_generator():
+            yield mock_session
+
+        from db.database import get_db
+        app.dependency_overrides[get_db] = mock_db_generator
+        
+        try:
+            async with AsyncClient(app=app, base_url="http://test") as client:
+                response = await client.get(
+                    "/api/meetings/meeting_001/summary",
+                    headers={"X-API-Key": TEST_API_KEY}
+                )
+
+                assert response.status_code == 200
+                data = response.json()
+                assert data["meeting_id"] == "meeting_001"
+                assert data["status"] == "completed"
+                assert data["summary_text"] == "Summary body"
+                assert data["workflow_result_count"] == 2
+        finally:
+            app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_approve_decision_not_found():
     """Test approving non-existent decision."""
     with patch('api.meetings.get_db') as mock_get_db, \

@@ -21,12 +21,39 @@ from agents.classifier_agent import ClassifierAgent
 from agents.workflow.jira_agent import JiraAgent, JiraMode
 from integrations.slack import SlackApprovalGate, create_slack_approval_gate
 from integrations.llm_factory import get_llm_client
+from integrations.llm_factory import get_llm_api_call_label
 from db.database import get_db_session
 from db.models import AuditEntry, Decision as DecisionModel, Meeting as MeetingModel
 from sqlalchemy import select
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _write_meeting_audit_entry(
+    meeting_id: str,
+    agent: str,
+    step: str,
+    outcome: str,
+    detail: str,
+    payload_snapshot: Dict[str, Any] | None = None,
+) -> None:
+    """Write an audit row that is explicitly linked to a meeting."""
+    try:
+        async with get_db_session() as session:
+            session.add(
+                AuditEntry(
+                    meeting_id=meeting_id,
+                    agent=agent,
+                    step=step,
+                    outcome=outcome,
+                    detail=detail,
+                    payload_snapshot=payload_snapshot,
+                )
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.error("Failed to write meeting audit entry for %s.%s: %s", agent, step, exc)
 
 
 async def _mark_meeting_failed(meeting_id: str, reason: str) -> None:
@@ -259,7 +286,7 @@ async def extract_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 step="extract_decisions",
                 outcome="success",
                 detail=f"Extraction complete: {len(extraction_output.decisions)} decisions, {len(extraction_output.ambiguous_items)} ambiguous",
-                api_call="gemini.generate_json"
+                api_call=get_llm_api_call_label()
             )
             session.add(audit_entry)
             await session.commit()
@@ -693,9 +720,31 @@ async def send_summary_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Update meeting status
             final_status = "failed" if state.get("errors") else "completed"
             await _set_meeting_status(state["meeting_id"], final_status)
+            await _write_meeting_audit_entry(
+                meeting_id=state["meeting_id"],
+                agent="SummaryAgent",
+                step="send_summary",
+                outcome="success",
+                detail=f"Generated execution summary with final meeting status {final_status}",
+                payload_snapshot={
+                    "summary_text": summary_text,
+                    "summary_length": len(summary_text),
+                    "workflow_result_count": len(workflow_results),
+                    "verification_result_count": len(verification_results),
+                    "final_status": final_status,
+                },
+            )
     
     except Exception as e:
         logger.error(f"Send summary node failed: {e}")
         state["errors"].append(f"Send summary failed: {str(e)}")
+        if state.get("meeting_id"):
+            await _write_meeting_audit_entry(
+                meeting_id=state["meeting_id"],
+                agent="SummaryAgent",
+                step="send_summary",
+                outcome="failure",
+                detail=f"Failed to generate or send summary: {str(e)}",
+            )
     
     return state

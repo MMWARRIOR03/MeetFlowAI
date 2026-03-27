@@ -279,7 +279,14 @@ class SlackApprovalGate:
         elif workflow_type == WorkflowType.PROCUREMENT_REQUEST.value:
             lines.append(f"• Item: {parameters.get('item_description', 'N/A')}")
             lines.append(f"• Quantity: {parameters.get('quantity', 'N/A')}")
-            lines.append(f"• Cost: ${parameters.get('estimated_cost', 0):,.2f}")
+            estimated_cost = parameters.get("estimated_cost")
+            if estimated_cost in (None, ""):
+                lines.append("• Cost: N/A")
+            else:
+                try:
+                    lines.append(f"• Cost: ${float(estimated_cost):,.2f}")
+                except (TypeError, ValueError):
+                    lines.append(f"• Cost: {estimated_cost}")
             if parameters.get('vendor'):
                 lines.append(f"• Vendor: {parameters['vendor']}")
         else:

@@ -28,7 +28,9 @@ def jira_agent():
     with patch.dict('os.environ', {
         'JIRA_URL': 'https://test.atlassian.net',
         'JIRA_EMAIL': 'test@example.com',
-        'JIRA_API_TOKEN': 'test-token'
+        'JIRA_API_TOKEN': 'test-token',
+        'JIRA_DEFAULT_PROJECT_KEY': 'PROJ',
+        'JIRA_ALLOWED_PROJECT_KEYS': 'PROJ',
     }):
         agent = JiraAgent()
         yield agent
@@ -84,6 +86,80 @@ async def test_create_ticket_success(jira_agent, mock_decision):
     assert len(result.artifact_links) == 1
     assert "PROJ-123" in result.artifact_links[0]
     assert result.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_falls_back_to_default_project(jira_agent, mock_decision):
+    create_response = MagicMock()
+    create_response.json.return_value = {"key": "PROJ-124"}
+    create_response.raise_for_status = MagicMock()
+
+    verify_response = MagicMock()
+    verify_response.json.return_value = {
+        "key": "PROJ-124",
+        "fields": {"summary": "Fallback issue"}
+    }
+    verify_response.raise_for_status = MagicMock()
+
+    comment_response = MagicMock()
+    comment_response.raise_for_status = MagicMock()
+
+    jira_agent.client.post = AsyncMock(side_effect=[create_response, comment_response])
+    jira_agent.client.get = AsyncMock(return_value=verify_response)
+    jira_agent._resolve_user = AsyncMock(return_value="account123")
+
+    with patch('agents.workflow.jira_agent.get_db_session'):
+        parameters = {
+            "project_key": "MOBILE",
+            "issue_type": "Task",
+            "summary": "Fallback issue",
+            "description": "Test description",
+            "assignee": "Ankit",
+            "priority": "Medium"
+        }
+
+        result = await jira_agent.execute(mock_decision, parameters, JiraMode.CREATE)
+
+    assert result.status == "success"
+    post_payload = jira_agent.client.post.await_args_list[0].kwargs["json"]
+    assert post_payload["fields"]["project"]["key"] == "PROJ"
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_omits_blank_priority(jira_agent, mock_decision):
+    create_response = MagicMock()
+    create_response.json.return_value = {"key": "PROJ-125"}
+    create_response.raise_for_status = MagicMock()
+
+    verify_response = MagicMock()
+    verify_response.json.return_value = {
+        "key": "PROJ-125",
+        "fields": {"summary": "No priority issue"}
+    }
+    verify_response.raise_for_status = MagicMock()
+
+    comment_response = MagicMock()
+    comment_response.raise_for_status = MagicMock()
+
+    jira_agent.client.post = AsyncMock(side_effect=[create_response, comment_response])
+    jira_agent.client.get = AsyncMock(return_value=verify_response)
+    jira_agent._resolve_user = AsyncMock(return_value="account123")
+
+    with patch('agents.workflow.jira_agent.get_db_session'):
+        parameters = {
+            "project_key": "PROJ",
+            "issue_type": "Task",
+            "summary": "No priority issue",
+            "description": "Test description",
+            "assignee": "Ankit",
+            "priority": "   ",
+        }
+
+        result = await jira_agent.execute(mock_decision, parameters, JiraMode.CREATE)
+
+    assert result.status == "success"
+    post_payload = jira_agent.client.post.await_args_list[0].kwargs["json"]
+    assert "priority" not in post_payload["fields"]
 
 
 @pytest.mark.asyncio

@@ -22,3 +22,9 @@ def get_llm_client(api_key: str | None = None):
         return GeminiClient(api_key=api_key)
 
     raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
+
+
+def get_llm_api_call_label(operation: str = "generate_json") -> str:
+    """Return an audit label for the active LLM provider."""
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    return f"{provider}.{operation}"

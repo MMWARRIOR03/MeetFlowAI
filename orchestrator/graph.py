@@ -7,7 +7,13 @@ from typing import TypedDict, Optional, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from schemas.base import NormalizedMeeting, Decision, ClassifierOutput, WorkflowResult
+from schemas.base import (
+    NormalizedMeeting,
+    Decision,
+    ClassifierOutput,
+    WorkflowResult,
+    VerificationResult,
+)
 from orchestrator.nodes import (
     ingest_node,
     extract_node,
@@ -31,6 +37,7 @@ class PipelineState(TypedDict):
     classifier_outputs: List[ClassifierOutput]
     approval_pending: List[str]  # Decision IDs
     workflow_results: List[WorkflowResult]
+    verification_results: List[VerificationResult]
     errors: List[str]
     # Input data for ingestion
     input_data: Optional[Any]

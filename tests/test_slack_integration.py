@@ -81,6 +81,22 @@ async def test_send_approval_message(slack_gate, sample_decision, mock_slack_app
     assert db_session.commit.called
 
 
+def test_build_approval_blocks_handles_missing_procurement_cost(slack_gate, sample_decision):
+    """Procurement Slack blocks should tolerate a missing estimated_cost."""
+    sample_decision.parameters["estimated_cost"] = None
+
+    blocks = slack_gate._build_approval_blocks(sample_decision)
+
+    parameter_block = next(
+        block for block in blocks
+        if block["type"] == "section"
+        and "text" in block
+        and "*Parameters:*" in block["text"]["text"]
+    )
+
+    assert "• Cost: N/A" in parameter_block["text"]["text"]
+
+
 @pytest.mark.asyncio
 async def test_build_approval_blocks(slack_gate, sample_decision):
     """Test Block Kit message structure."""
