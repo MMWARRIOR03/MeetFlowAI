@@ -51,6 +51,25 @@ def test_normalize_update_fields_wraps_direct_priority_name():
     }
 
 
+def test_normalize_update_fields_canonicalizes_capitalized_classifier_keys():
+    agent = JiraAgent()
+
+    normalized = agent._normalize_update_fields(
+        {
+            "fields_to_update": ["Summary", "Priority"],
+            "new_values": {
+                "Summary": "API migration schedule has shifted",
+                "Priority": "High",
+            },
+        }
+    )
+
+    assert normalized == {
+        "summary": "API migration schedule has shifted",
+        "priority": {"name": "High"},
+    }
+
+
 def test_resolve_project_key_defaults_to_proj_for_missing_or_invalid_key():
     agent = JiraAgent()
 

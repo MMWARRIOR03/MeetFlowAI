@@ -3,6 +3,8 @@ FastAPI endpoints for Slack interactions.
 Handles interactive message callbacks from Slack.
 """
 import logging
+import json
+from urllib.parse import parse_qs
 from fastapi import APIRouter, Request, HTTPException, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -73,9 +75,9 @@ async def handle_slack_interaction(
                 detail="Invalid Slack signature"
             )
         
-        # Parse form data (Slack sends as application/x-www-form-urlencoded)
-        form_data = await request.form()
-        payload_str = form_data.get("payload")
+        # Parse form data from the raw body to avoid multipart dependencies.
+        form_data = parse_qs(body_str)
+        payload_str = form_data.get("payload", [None])[0]
         
         if not payload_str:
             raise HTTPException(
@@ -84,7 +86,6 @@ async def handle_slack_interaction(
             )
         
         # Parse JSON payload
-        import json
         payload = json.loads(payload_str)
         
         logger.info(f"Received Slack interaction: {payload.get('type')}")

@@ -3,13 +3,20 @@ Integration tests for Slack approval gate.
 """
 import pytest
 import json
+import hmac
+import hashlib
+import time
+from urllib.parse import urlencode
 from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.testclient import TestClient
 
+import api.slack as slack_api
 from integrations.slack import SlackApprovalGate
 from db.models import Decision, AuditEntry
 from schemas.base import WorkflowType
+from main import app
 
 
 @pytest.fixture
@@ -52,6 +59,11 @@ def sample_decision():
             "vendor": "Amazon Web Services"
         }
     )
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
 
 
 @pytest.mark.asyncio
@@ -336,3 +348,53 @@ def test_verify_slack_signature_old_timestamp():
     )
     
     assert is_valid is False
+
+
+@patch("api.slack.SlackApprovalGate.verify_slack_signature", return_value=True)
+@patch("api.slack.get_slack_gate")
+def test_slack_interactions_endpoint_parses_urlencoded_payload(
+    mock_get_slack_gate,
+    mock_verify_signature,
+    client,
+):
+    fake_gate = MagicMock()
+    fake_gate.signing_secret = "test-secret"
+    fake_gate.handle_interaction = AsyncMock()
+    mock_get_slack_gate.return_value = fake_gate
+
+    fake_db = AsyncMock(spec=AsyncSession)
+
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[slack_api.get_db] = override_get_db
+
+    payload = {
+        "type": "block_actions",
+        "user": {"id": "U123", "username": "approver"},
+        "actions": [
+            {
+                "action_id": "approve_decision",
+                "value": json.dumps({"decision_id": "dec_001", "action": "approve"}),
+            }
+        ],
+        "channel": {"id": "C123456"},
+        "message": {"ts": "1234567890.123456", "blocks": []},
+    }
+    body = urlencode({"payload": json.dumps(payload)})
+    response = client.post(
+        "/slack/interactions",
+        content=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Slack-Request-Timestamp": str(int(time.time())),
+            "X-Slack-Signature": "v0=test",
+        },
+    )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    mock_verify_signature.assert_called_once()
+    fake_gate.handle_interaction.assert_awaited_once()

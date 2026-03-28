@@ -158,6 +158,15 @@ class TestAPIEndpointsAuthentication:
         response = client.get("/api/audit/summary")
         assert response.status_code == 401
 
+    @patch("api.auth.get_valid_api_keys")
+    def test_slack_interactions_do_not_require_api_key(self, mock_get_keys, client, mock_api_keys):
+        """Slack callbacks should bypass API-key auth and be handled by Slack signature checks."""
+        mock_get_keys.return_value = mock_api_keys
+
+        response = client.post("/slack/interactions", data={})
+
+        assert response.status_code != 401
+
 
 class TestHTTPStatusCodes:
     """Test proper HTTP status codes are returned."""

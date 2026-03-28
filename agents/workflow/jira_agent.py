@@ -413,11 +413,24 @@ class JiraAgent:
 
     def _normalize_jira_field_values(self, fields: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize field values into Jira's expected update payload shapes."""
-        normalized = dict(fields)
+        field_name_map = {
+            "summary": "summary",
+            "priority": "priority",
+            "deadline": "duedate",
+            "duedate": "duedate",
+        }
+        normalized: Dict[str, Any] = {}
+
+        for field_name, value in fields.items():
+            jira_field = field_name_map.get(field_name.lower(), field_name)
+            normalized[jira_field] = value
 
         priority_value = normalized.get("priority")
         if isinstance(priority_value, str):
-            normalized["priority"] = {"name": priority_value}
+            if priority_value.strip():
+                normalized["priority"] = {"name": priority_value.strip()}
+            else:
+                normalized.pop("priority", None)
 
         return normalized
 

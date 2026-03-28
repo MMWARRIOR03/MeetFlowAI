@@ -88,6 +88,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
     # Route prefixes that don't require authentication
     PUBLIC_PREFIXES = [
         "/api/health",
+        "/slack",
     ]
     
     async def dispatch(self, request: Request, call_next):
